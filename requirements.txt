@@ -1,7 +1,7 @@
-python-telegram-bot
-solana
-mnemonic
-base58
-requests
-python-dotenv
-solders
+python-telegram-bot==21.2
+solana==0.30.0
+mnemonic==0.21
+base58==2.1.1
+requests==2.32.3
+python-dotenv==1.0.1
+spl-token==0.2.0
