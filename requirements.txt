@@ -1,0 +1,7 @@
+python-telegram-bot
+solana
+mnemonic
+base58
+requests
+python-dotenv
+spl-token
