@@ -144,20 +144,20 @@ def _add_wallet_to_user(user_id: int, keypair: Keypair):
     """Adds a new wallet to a user's list of wallets. Sets it as the current wallet if it's the first one added."""
     user_data = _get_user_wallets(user_id)
     # Check if wallet already exists to prevent duplicates
-    if any(kp.public_key == keypair.public_key for kp in user_data['wallets']):
-        logger.info(f"Wallet {keypair.public_key} already exists for user {user_id}.")
+    if any(kp.pubkey() == keypair.pubkey() for kp in user_data['wallets']):
+        logger.info(f"Wallet {keypair.pubkey()} already exists for user {user_id}.")
         return False
     user_data['wallets'].append(keypair)
     if len(user_data['wallets']) == 1: # If it's the first wallet, set it as current
         user_data['current_index'] = 0
-    logger.info(f"Wallet {keypair.public_key} added for user {user_id}.")
+    logger.info(f"Wallet {keypair.pubkey()} added for user {user_id}.")
     return True
 
 def _remove_wallet_from_user(user_id: int, index: int) -> bool:
     """Removes a wallet at a specific index for a user. Adjusts current_index if necessary."""
     user_data = _get_user_wallets(user_id)
     if 0 <= index < len(user_data['wallets']):
-        removed_wallet_pubkey = user_data['wallets'][index].public_key
+        removed_wallet_pubkey = user_data['wallets'][index].pubkey()
         del user_data['wallets'][index]
         logger.info(f"Wallet {removed_wallet_pubkey} removed for user {user_id}.")
         if not user_data['wallets']: # No wallets left
@@ -183,7 +183,7 @@ async def _get_sol_balance(rpc_url: str, pubkey_str: str) -> float:
     """Fetches the SOL balance for a given public key."""
     try:
         async with AsyncClient(rpc_url) as client:
-            res = await client.get_balance(PublicKey(pubkey_str))
+            res = await client.get_balance(Pubkey.from_string(pubkey_str))
             lamports = res.value
             return lamports / 1e9
     except RPCException as e:
@@ -219,7 +219,7 @@ async def _request_devnet_airdrop(pubkey_str: str) -> str | None:
     devnet_rpc_url = "https://api.devnet.solana.com"
     try:
         async with AsyncClient(devnet_rpc_url) as client:
-            res = await client.request_airdrop(PublicKey(pubkey_str), 1_000_000_000)
+            res = await client.request_airdrop(Pubkey.from_string(pubkey_str), 1_000_000_000)
             signature = res.value
             if signature:
                 await client.confirm_transaction(signature, commitment='confirmed')
@@ -242,15 +242,15 @@ async def _create_spl_token_mint(
     decimals: int,
     name: str,
     symbol: str
-) -> tuple[PublicKey, str]:
+) -> tuple[Pubkey, str]:
     """Creates a new SPL token mint account."""
     async with AsyncClient(rpc_url) as client:
         mint_keypair = Keypair()
         token = await AsyncToken.create_mint(
             conn=client,
             payer=payer,
-            mint_authority=payer.public_key,
-            freeze_authority=payer.public_key,
+            mint_authority=payer.pubkey(),
+            freeze_authority=payer.pubkey(),
             decimals=decimals,
             program_id=TOKEN_PROGRAM_ID,
             skip_confirmation=False,
@@ -263,20 +263,20 @@ async def _create_spl_token_mint(
 async def _mint_spl_tokens(
     rpc_url: str,
     payer: Keypair,
-    mint_pubkey: PublicKey,
+    mint_pubkey: Pubkey,
     amount: int,
     decimals: int
 ) -> str:
     """Mints new SPL tokens to the payer's associated token account."""
     async with AsyncClient(rpc_url) as client:
         token_client = AsyncToken(client, mint_pubkey, TOKEN_PROGRAM_ID, payer)
-        associated_token_address = get_associated_token_address(payer.public_key, mint_pubkey)
+        associated_token_address = get_associated_token_address(payer.pubkey(), mint_pubkey)
 
         try:
             await client.get_account_info(associated_token_address)
-            logger.info(f"Associated Token Account {associated_token_address} already exists for {payer.public_key}.")
+            logger.info(f"Associated Token Account {associated_token_address} already exists for {payer.pubkey()}.")
         except RPCException:
-            logger.info(f"Creating Associated Token Account {associated_token_address} for {payer.public_key}.")
+            logger.info(f"Creating Associated Token Account {associated_token_address} for {payer.pubkey()}.")
             pass
 
         tx_signature = await token_client.mint_to(
@@ -289,7 +289,7 @@ async def _mint_spl_tokens(
         logger.info(f"Minted {amount} tokens to {associated_token_address} with Tx: {tx_signature}")
         return tx_signature
 
-async def _get_token_accounts_and_balances(rpc_url: str, owner_pubkey: PublicKey) -> dict:
+async def _get_token_accounts_and_balances(rpc_url: str, owner_pubkey: Pubkey) -> dict:
     """Fetches all SPL token accounts and their balances for a given owner."""
     token_balances = {}
     async with AsyncClient(rpc_url) as client:
@@ -327,8 +327,8 @@ async def _get_token_accounts_and_balances(rpc_url: str, owner_pubkey: PublicKey
 async def _revoke_token_delegate(
     rpc_url: str,
     owner_wallet: Keypair,
-    mint_pubkey: PublicKey,
-    token_account_owner_pubkey: PublicKey
+    mint_pubkey: Pubkey,
+    token_account_owner_pubkey: Pubkey
 ) -> str:
     """Revokes any delegate authority on a specific token account."""
     async with AsyncClient(rpc_url) as client:
@@ -337,7 +337,7 @@ async def _revoke_token_delegate(
         revoke_ix = revoke(RevokeParams(
             program_id=TOKEN_PROGRAM_ID,
             account=token_account_pubkey,
-            owner=owner_wallet.public_key,
+            owner=owner_wallet.pubkey(),
             signers=[]
         ))
         recent_blockhash = (await client.get_latest_blockhash()).value.blockhash
@@ -356,7 +356,6 @@ async def _revoke_token_delegate(
             logger.error(f"Error revoking delegate for {token_account_pubkey}: {e}")
             raise e
 
-
 # --- Helper functions for UI messages ---
 async def get_start_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Generates the /start message based on wallet connection status."""
@@ -374,12 +373,12 @@ async def get_start_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
     if wallets and current_wallet_index < len(wallets):
         wallet = wallets[current_wallet_index]
-        sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.public_key))
+        sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.pubkey()))
         usd_val = sol_balance * sol_price if sol_price is not None else 0
 
         msg_parts.append(
             "💳 Your Current Wallet:\n"
-            f"↳ `{wallet.public_key}` 🅴\n"
+            f"↳ `{wallet.pubkey()}` 🅴\n"
             f"↳ SOL Balance: {sol_balance:.4f} SOL\n"
             f"↳ Total USD : ${usd_val:.2f}\n"
         )
@@ -430,13 +429,13 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if wallets and current_wallet_index < len(wallets):
         wallet = wallets[current_wallet_index]
-        sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.public_key))
+        sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.pubkey()))
         sol_price = await get_cached_sol_price() or 0
         usd_val = sol_balance * sol_price
 
         msg = (
             "💳 Your Current Wallet:\n"
-            f"Address: `{wallet.public_key}` 🅴\n"
+            f"Address: `{wallet.pubkey()}` 🅴\n"
             f"SOL Balance: {sol_balance:.4f} SOL\n"
             f"Estimated USD: ${usd_val:.2f}\n\n"
           
@@ -471,12 +470,12 @@ async def wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "Your connected wallets:\n"
         for i, wallet in enumerate(wallets):
             status = "✅ (Current)" if i == current_wallet_index else ""
-            msg += f"  `{str(wallet.public_key)[:6]}...{str(wallet.public_key)[-4:]}` {status}\n"
+            msg += f"  `{str(wallet.pubkey())[:6]}...{str(wallet.pubkey())[-4:]}` {status}\n"
         msg += "\nSelect a wallet to switch, or use the options below:\n"
 
     keyboard = []
     for i, wallet in enumerate(wallets):
-        keyboard.append([InlineKeyboardButton(f"Switch to Wallet {i+1} ({str(wallet.public_key)[:6]}...)", callback_data=f"switch_wallet_{i}")])
+        keyboard.append([InlineKeyboardButton(f"Switch to Wallet {i+1} ({str(wallet.pubkey())[:6]}...)", callback_data=f"switch_wallet_{i}")])
 
     keyboard.append([InlineKeyboardButton("➕ Add New Wallet", callback_data="add_wallet")])
     if wallets:
@@ -511,7 +510,7 @@ async def switch_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 0 <= index_to_switch < len(wallets):
             _set_current_wallet_index(user_id, index_to_switch)
             await query.edit_message_text(f"✅ Switched to wallet {index_to_switch + 1}.\n"
-                                          f"Current wallet: `{wallets[index_to_switch].public_key}`")
+                                          f"Current wallet: `{wallets[index_to_switch].pubkey()}`")
             msg, reply_markup = await get_start_message(user_id)
             await query.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
         else:
@@ -610,10 +609,10 @@ async def show_token_balances(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     wallet = wallets[current_index]
-    await query.edit_message_text(f"Fetching token balances for `{wallet.public_key}`...")
+    await query.edit_message_text(f"Fetching token balances for `{wallet.pubkey()}`...")
 
     try:
-        token_balances = await _get_token_accounts_and_balances(SOLANA_RPC_URL, wallet.public_key)
+        token_balances = await _get_token_accounts_and_balances(SOLANA_RPC_URL, wallet.pubkey())
         if not token_balances:
             msg = "No SPL tokens found in this wallet."
         else:
@@ -661,12 +660,12 @@ async def wallet_import_receive(update: Update, context: ContextTypes.DEFAULT_TY
     if wallet is not None:
         if _add_wallet_to_user(user_id, wallet):
             await update.message.reply_text(
-                f"✅ Wallet imported successfully.\nAddress: `{wallet.public_key}`\n⚠️ Only use test wallets.",
+                f"✅ Wallet imported successfully.\nAddress: `{wallet.pubkey()}`\n⚠️ Only use test wallets.",
                 parse_mode="Markdown"
             )
         else:
             await update.message.reply_text(
-                f"ℹ️ Wallet `{wallet.public_key}` was already connected. No new wallet added.",
+                f"ℹ️ Wallet `{wallet.pubkey()}` was already connected. No new wallet added.",
                 parse_mode="Markdown"
             )
         msg, reply_markup = await get_start_message(user_id)
@@ -697,7 +696,7 @@ async def token_info_detector(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     if re.match(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$", text):
         try:
-            PublicKey(text)
+            Pubkey.from_string(text)
             is_valid_solana_address = True
         except Exception:
             is_valid_solana_address = False
@@ -730,9 +729,9 @@ async def airdrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     wallet = wallets[current_index]
-    await update.message.reply_text(f"Requesting Devnet airdrop for `{wallet.public_key}`...")
+    await update.message.reply_text(f"Requesting Devnet airdrop for `{wallet.pubkey()}`...")
     try:
-        tx_signature = await _request_devnet_airdrop(str(wallet.public_key))
+        tx_signature = await _request_devnet_airdrop(str(wallet.pubkey()))
         if tx_signature:
             await update.message.reply_text(f"✅ Devnet airdrop requested!\nTx Signature: `{tx_signature}`")
         else:
@@ -782,7 +781,7 @@ async def receive_buy_token_address(update: Update, context: ContextTypes.DEFAUL
     """Receives the token address for buying."""
     token_address_str = update.message.text.strip()
     try:
-        PublicKey(token_address_str)
+        Pubkey.from_string(token_address_str)
     except Exception:
         await update.message.reply_text("❌ Invalid token address. Please send a valid Solana token address.")
         return BUY_TOKEN_ADDRESS
@@ -816,7 +815,7 @@ async def receive_buy_token_amount(update: Update, context: ContextTypes.DEFAULT
 
     try:
         async with AsyncClient(SOLANA_RPC_URL) as client:
-            current_sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.public_key))
+            current_sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.pubkey()))
             if current_sol_balance < sol_amount:
                 await update.message.reply_text(
                     f"❌ Insufficient SOL balance. You have {current_sol_balance:.4f} SOL, but need {sol_amount} SOL."
@@ -858,7 +857,7 @@ async def receive_sell_token_address(update: Update, context: ContextTypes.DEFAU
     """Receives the token address for selling."""
     token_address_str = update.message.text.strip()
     try:
-        PublicKey(token_address_str)
+        Pubkey.from_string(token_address_str)
     except Exception:
         await update.message.reply_text("❌ Invalid token address. Please send a valid Solana token address.")
         return SELL_TOKEN_ADDRESS
@@ -1029,7 +1028,7 @@ async def receive_transfer_recipient(update: Update, context: ContextTypes.DEFAU
     """Receives the recipient address for SOL transfer."""
     recipient_address_str = update.message.text.strip()
     try:
-        PublicKey(recipient_address_str)
+        Pubkey.from_string(recipient_address_str)
     except Exception:
         await update.message.reply_text("❌ Invalid recipient address. Please send a valid Solana public key.")
         return TRANSFER_SOL_RECIPIENT
@@ -1063,7 +1062,7 @@ async def receive_transfer_amount(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         async with AsyncClient(SOLANA_RPC_URL) as client:
-            current_sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(sender_wallet.public_key))
+            current_sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(sender_wallet.pubkey()))
             estimated_fee_sol = 0.00001
             if current_sol_balance < (sol_amount + estimated_fee_sol):
                 await update.message.reply_text(
@@ -1077,8 +1076,8 @@ async def receive_transfer_amount(update: Update, context: ContextTypes.DEFAULT_
 
             transaction = Transaction(recent_blockhash=recent_blockhash)
             transaction.add(transfer(
-                from_pubkey=sender_wallet.public_key,
-                to_pubkey=PublicKey(recipient_address_str),
+                from_pubkey=sender_wallet.pubkey(),
+                to_pubkey=Pubkey.from_string(recipient_address_str),
                 lamports=lamports
             ))
 
@@ -1124,7 +1123,7 @@ async def receive_revoke_token_mint(update: Update, context: ContextTypes.DEFAUL
     """Receives the token mint address for revoking permissions."""
     token_mint_str = update.message.text.strip()
     try:
-        PublicKey(token_mint_str)
+        Pubkey.from_string(token_mint_str)
     except Exception:
         await update.message.reply_text("❌ Invalid token mint address. Please send a valid Solana public key.")
         return REVOKE_TOKEN_MINT
@@ -1140,7 +1139,7 @@ async def receive_revoke_token_owner(update: Update, context: ContextTypes.DEFAU
     """Receives the owner's public key and attempts to revoke token permissions."""
     owner_pubkey_str = update.message.text.strip()
     try:
-        PublicKey(owner_pubkey_str)
+        Pubkey.from_string(owner_pubkey_str)
     except Exception:
         await update.message.reply_text("❌ Invalid owner public key. Please send a valid Solana public key.")
         return REVOKE_TOKEN_OWNER
@@ -1156,7 +1155,7 @@ async def receive_revoke_token_owner(update: Update, context: ContextTypes.DEFAU
         await update.message.reply_text("An error occurred. Please restart the revoke process.")
         return ConversationHandler.END
 
-    if str(payer_wallet.public_key) != owner_pubkey_str:
+    if str(payer_wallet.pubkey()) != owner_pubkey_str:
         await update.message.reply_text(
             "❌ The provided owner public key does not match your currently connected wallet.\n"
             "Please ensure you are trying to revoke permissions for a token account owned by your active wallet."
@@ -1170,7 +1169,7 @@ async def receive_revoke_token_owner(update: Update, context: ContextTypes.DEFAU
 
     try:
         tx_signature = await _revoke_token_delegate(
-            SOLANA_RPC_URL, payer_wallet, PublicKey(token_mint_str), PublicKey(owner_pubkey_str)
+            SOLANA_RPC_URL, payer_wallet, Pubkey.from_string(token_mint_str), Pubkey.from_string(owner_pubkey_str)
         )
         await update.message.reply_text(
             f"✅ Token permissions revoked successfully!\n"
