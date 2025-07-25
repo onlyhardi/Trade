@@ -1,7 +1,7 @@
-python-telegram-bot
-solana
-mnemonic
-base58
-requests
-python-dotenv
-spl-token
+python-telegram-bot==20.3
+solana==0.29.0
+mnemonic==0.20
+base58==2.1.1
+requests==2.31.0
+python-dotenv==1.0.0
+solders==0.18.0  # Contains SPL token tools
