@@ -16,14 +16,16 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
-# --- UPDATED IMPORTS FOR SOLDERS ---
+# --- UPDATED IMPORTS FOR SOLDERS (These are correct) ---
 from solders.keypair import Keypair
-from solders.rpc.async_api import AsyncClient # AsyncClient might still be here, or check solders.rpc if issues
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
-from solders.system_program import transfer # Changed from solana.system_program
-from solana.rpc.types import TxOpts, TokenAccountOpts # These should still be under solana.rpc.types
-from solana.rpc.api import RPCException # This should still be under solana.rpc.api
+from solders.system_program import transfer
+
+# --- AsynchClient, TxOpts, RPCException are still in the 'solana' namespace ---
+from solana.rpc.async_api import AsyncClient # <-- THIS IS THE CORRECTED LINE
+from solana.rpc.types import TxOpts, TokenAccountOpts
+from solana.rpc.api import RPCException
 
 from mnemonic import Mnemonic
 import base58
