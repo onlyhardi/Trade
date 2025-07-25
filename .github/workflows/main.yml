@@ -1,36 +1,55 @@
-name: CI Pipeline
+name: Python Telegram Bot CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
-  build-and-test:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
-    
+        python-version: '3.10' # Or your preferred Python version, e.g., '3.11', '3.12'
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install pytest flake8 black
-    
-    - name: Run linter (flake8)
+
+    - name: Lint with Flake8
       run: |
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    
-    - name: Run formatter check (Black)
+        pip install flake8
+        # Stop the build if there are Python syntax errors or warnings
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit with 0 if no errors or warnings are found
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+      # Flake8 settings:
+      # --count: show total errors and warnings
+      # --select=E9,F63,F7,F82: only select error codes related to syntax errors, name errors, etc.
+      # --show-source: show the source code of the error
+      # --statistics: print a summary of all error codes
+      # --exit-zero: don't exit with a non-zero exit code if only warnings are present
+      # --max-complexity=10: McCabe complexity plugin, warn if complexity is too high
+      # --max-line-length=120: max line length 120 chars
+
+    - name: Run tests (Placeholder)
       run: |
-        black --check --diff .
-    
-    - name: Run tests
+        echo "No tests found. Add your test suite here, e.g., pytest."
+        # If you had tests, you would run them like:
+        # pip install pytest
+        # pytest
+
+    - name: Deploy (Placeholder)
       run: |
-        pytest -v
+        echo "This is a placeholder for your deployment steps."
+        echo "Depending on your hosting, this might involve pushing to a server, using Docker, etc."
