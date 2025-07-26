@@ -4,3 +4,4 @@ mnemonic
 base58
 requests
 python-dotenv
+jupiter-python-sdk
