@@ -2,8 +2,11 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta
 import json
+import base58
+import requests
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,22 +19,16 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
-# --- UPDATED IMPORTS FOR SOLDERS (These are correct) ---
 from solders.keypair import Keypair
+from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
-from solders.transaction import Transaction
-from solders.system_program import transfer
-
-# --- AsynchClient, TxOpts, RPCException are still in the 'solana' namespace ---
-from solana.rpc.async_api import AsyncClient # <-- THIS IS THE CORRECTED LINE
+from solana.transaction import Transaction
+from solana.system_program import transfer
 from solana.rpc.types import TxOpts, TokenAccountOpts
 from solana.rpc.api import RPCException
+from solana.rpc.commitment import Confirmed
 
 from mnemonic import Mnemonic
-import base58
-import requests
-from dotenv import load_dotenv
-
 from spl.token.async_client import AsyncToken
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import (
@@ -40,6 +37,8 @@ from spl.token.instructions import (
     RevokeParams
 )
 
+# Jupiter SDK imports
+from jupiter_python_sdk.jupiter import Jupiter
 
 # --- Load environment variables ---
 load_dotenv()
@@ -47,9 +46,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 
 # --- Global state ---
-# In-memory storage for user wallets.
-# For production, replace with persistent database (e.g., Firestore, PostgreSQL)
-# Structure: {user_id: {'wallets': [Keypair, ...], 'current_index': 0}}
 _user_wallets = {}
 
 # --- Logging ---
@@ -70,6 +66,10 @@ TRANSFER_SOL_RECIPIENT = 10
 TRANSFER_SOL_AMOUNT = 11
 REVOKE_TOKEN_MINT = 12
 REVOKE_TOKEN_OWNER = 13
+
+# --- Constants ---
+SOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
+DEFAULT_SLIPPAGE_BPS = 50  # 0.5% slippage
 
 # --- Rate Limiting ---
 user_last_command_time = {}
@@ -97,13 +97,105 @@ async def get_cached_sol_price():
         return SOL_PRICE_CACHE["price"]
     else:
         logger.info("Fetching new SOL price.")
-        price = await _get_sol_price_from_api()
+        price = await _get_sol_price()
         if price is not None:
             SOL_PRICE_CACHE["price"] = price
             SOL_PRICE_CACHE["timestamp"] = current_time
         return price
 
-# --- Helper functions (consolidated from modules) ---
+async def _get_sol_price() -> float | None:
+    """Fetches the current SOL price in USD from CoinGecko API."""
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+        logger.info(f"Fetching SOL price from CoinGecko: {url}")
+        
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "solana" in data and "usd" in data["solana"]:
+            price = data["solana"]["usd"]
+            logger.info(f"Successfully fetched SOL price: {price}")
+            return float(price)
+        else:
+            logger.warning("SOL price not found in CoinGecko response.")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching SOL price: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching SOL price: {e}")
+        return None
+
+# --- Jupiter DEX Aggregator Functions ---
+async def get_jupiter_client(payer_keypair: Keypair = None) -> Jupiter:
+    """Initializes and returns a Jupiter client."""
+    async_client = AsyncClient(SOLANA_RPC_URL)
+    jupiter = Jupiter(async_client, payer_keypair)
+    return jupiter
+
+async def get_swap_quote(
+    input_mint: Pubkey,
+    output_mint: Pubkey,
+    amount: int,
+    slippage_bps: int = DEFAULT_SLIPPAGE_BPS
+) -> dict | None:
+    """Fetches a swap quote from Jupiter Aggregator."""
+    jupiter_client = await get_jupiter_client()
+    try:
+        quote = await jupiter_client.quote(
+            input_mint=str(input_mint),
+            output_mint=str(output_mint),
+            amount=amount,
+            slippage_bps=slippage_bps
+        )
+        logger.info(f"Jupiter Quote received: {json.dumps(quote, indent=2)}")
+        return quote
+    except Exception as e:
+        logger.error(f"Error fetching Jupiter quote: {e}", exc_info=True)
+        return None
+
+async def execute_jupiter_swap(
+    payer_keypair: Keypair,
+    input_mint: Pubkey,
+    output_mint: Pubkey,
+    amount: int,
+    slippage_bps: int = DEFAULT_SLIPPAGE_BPS
+) -> str | None:
+    """Executes a Jupiter swap."""
+    jupiter_client = await get_jupiter_client(payer_keypair)
+    try:
+        # Get swap transaction
+        swap_result = await jupiter_client.swap(
+            input_mint=str(input_mint),
+            output_mint=str(output_mint),
+            amount=amount,
+            slippage_bps=slippage_bps
+        )
+        
+        # Send the transaction
+        async with AsyncClient(SOLANA_RPC_URL) as client:
+            opts = TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
+            result = await client.send_raw_transaction(swap_result['swapTransaction'], opts=opts)
+            txn_id = result.value
+            logger.info(f"Swap transaction sent: {txn_id}")
+            return str(txn_id)
+            
+    except Exception as e:
+        logger.error(f"Error executing Jupiter swap: {e}", exc_info=True)
+        return None
+
+async def get_token_decimals(mint_address: Pubkey) -> int | None:
+    """Fetches the decimals for a token."""
+    try:
+        async with AsyncClient(SOLANA_RPC_URL) as client:
+            token_client = AsyncToken(client, mint_address, TOKEN_PROGRAM_ID, Keypair())
+            mint_info = await token_client.get_mint_info()
+            return mint_info.decimals
+    except Exception as e:
+        logger.error(f"Error fetching token decimals: {e}")
+        return None
 
 # --- Wallet Manager Functions ---
 def _import_wallet_from_phrase(phrase: str) -> Keypair | None:
@@ -123,9 +215,9 @@ def _import_wallet_from_privkey(privkey_base58: str) -> Keypair | None:
     """Imports a Solana Keypair from a base58 encoded private key."""
     try:
         secret = base58.b58decode(privkey_base58)
-        if len(secret) == 64: # Full 64-byte secret key (private key + public key)
+        if len(secret) == 64:
             return Keypair.from_secret_key(secret)
-        elif len(secret) == 32: # Only 32-byte private key seed
+        elif len(secret) == 32:
             return Keypair.from_seed(secret)
         else:
             logger.warning(f"Invalid private key length: {len(secret)} bytes. Expected 32 or 64.")
@@ -138,35 +230,34 @@ def _import_wallet_from_privkey(privkey_base58: str) -> Keypair | None:
         return None
 
 def _get_user_wallets(user_id: int) -> dict:
-    """Retrieves the wallet data for a specific user. Initializes if user has no wallets yet."""
+    """Retrieves the wallet data for a specific user."""
     if user_id not in _user_wallets:
         _user_wallets[user_id] = {'wallets': [], 'current_index': 0}
     return _user_wallets[user_id]
 
 def _add_wallet_to_user(user_id: int, keypair: Keypair):
-    """Adds a new wallet to a user's list of wallets. Sets it as the current wallet if it's the first one added."""
+    """Adds a new wallet to a user's list of wallets."""
     user_data = _get_user_wallets(user_id)
-    # Check if wallet already exists to prevent duplicates
     if any(kp.pubkey() == keypair.pubkey() for kp in user_data['wallets']):
         logger.info(f"Wallet {keypair.pubkey()} already exists for user {user_id}.")
         return False
     user_data['wallets'].append(keypair)
-    if len(user_data['wallets']) == 1: # If it's the first wallet, set it as current
+    if len(user_data['wallets']) == 1:
         user_data['current_index'] = 0
     logger.info(f"Wallet {keypair.pubkey()} added for user {user_id}.")
     return True
 
 def _remove_wallet_from_user(user_id: int, index: int) -> bool:
-    """Removes a wallet at a specific index for a user. Adjusts current_index if necessary."""
+    """Removes a wallet at a specific index for a user."""
     user_data = _get_user_wallets(user_id)
     if 0 <= index < len(user_data['wallets']):
         removed_wallet_pubkey = user_data['wallets'][index].pubkey()
         del user_data['wallets'][index]
         logger.info(f"Wallet {removed_wallet_pubkey} removed for user {user_id}.")
-        if not user_data['wallets']: # No wallets left
+        if not user_data['wallets']:
             user_data['current_index'] = 0
-        elif user_data['current_index'] >= len(user_data['wallets']): # Current index now out of bounds
-            user_data['current_index'] = len(user_data['wallets']) - 1 # Set to last available wallet
+        elif user_data['current_index'] >= len(user_data['wallets']):
+            user_data['current_index'] = len(user_data['wallets']) - 1
         return True
     logger.warning(f"Attempted to remove non-existent wallet at index {index} for user {user_id}.")
     return False
@@ -195,27 +286,6 @@ async def _get_sol_balance(rpc_url: str, pubkey_str: str) -> float:
     except Exception as e:
         logger.error(f"Error fetching SOL balance for {pubkey_str}: {e}")
         return 0.0
-
-async def _get_sol_price_from_api() -> float | None:
-    """Fetches the current SOL price in USD from Jupiter Aggregator API."""
-    try:
-        response = requests.get("https://price.jup.ag/v3/price?ids=SOL")
-        response.raise_for_status()
-        data = response.json()
-        price = data.get('data', {}).get('SOL', {}).get('price')
-        if price is None:
-            logger.warning("SOL price not found in Jupiter API response.")
-            return None
-        return float(price)
-    except requests.exceptions.RequestException as e:
-        logger.error(f"HTTP error fetching SOL price: {e}")
-        return None
-    except (KeyError, TypeError) as e:
-        logger.error(f"JSON parsing error fetching SOL price: {e}, Response: {response.text}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error fetching SOL price: {e}")
-        return None
 
 async def _request_devnet_airdrop(pubkey_str: str) -> str | None:
     """Requests a SOL airdrop on Devnet for a given public key."""
@@ -248,7 +318,6 @@ async def _create_spl_token_mint(
 ) -> tuple[Pubkey, str]:
     """Creates a new SPL token mint account."""
     async with AsyncClient(rpc_url) as client:
-        mint_keypair = Keypair()
         token = await AsyncToken.create_mint(
             conn=client,
             payer=payer,
@@ -408,9 +477,8 @@ async def get_start_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     return msg, reply_markup
 
 # --- Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /start command, showing initial bot message and main menu."""
+    """Handles the /start command."""
     user_id = update.effective_user.id
     if is_rate_limited(user_id):
         await update.message.reply_text("Please wait a moment before sending another command.")
@@ -420,7 +488,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /wallets command, showing current wallet info or prompt to connect."""
+    """Handles the /wallets command."""
     user_id = update.effective_user.id
     if is_rate_limited(user_id):
         await update.message.reply_text("Please wait a moment before sending another command.")
@@ -428,10 +496,10 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data = _get_user_wallets(user_id)
     wallets = user_data.get('wallets', [])
-    current_wallet_index = user_data.get('current_index', 0)
+    current_index = user_data.get('current_index', 0)
 
-    if wallets and current_wallet_index < len(wallets):
-        wallet = wallets[current_wallet_index]
+    if wallets and current_index < len(wallets):
+        wallet = wallets[current_index]
         sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.pubkey()))
         sol_price = await get_cached_sol_price() or 0
         usd_val = sol_balance * sol_price
@@ -441,7 +509,6 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Address: `{wallet.pubkey()}` 🅴\n"
             f"SOL Balance: {sol_balance:.4f} SOL\n"
             f"Estimated USD: ${usd_val:.2f}\n\n"
-          
             "Use /wallets_menu to manage your wallets."
         )
         await update.message.reply_text(msg, parse_mode="Markdown")
@@ -464,7 +531,7 @@ async def wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data = _get_user_wallets(user_id)
     wallets = user_data.get('wallets', [])
-    current_wallet_index = user_data.get('current_index', 0)
+    current_index = user_data.get('current_index', 0)
 
     msg = "💼 *Wallet Management*\n\n"
     if not wallets:
@@ -472,7 +539,7 @@ async def wallets_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg += "Your connected wallets:\n"
         for i, wallet in enumerate(wallets):
-            status = "✅ (Current)" if i == current_wallet_index else ""
+            status = "✅ (Current)" if i == current_index else ""
             msg += f"  `{str(wallet.pubkey())[:6]}...{str(wallet.pubkey())[-4:]}` {status}\n"
         msg += "\nSelect a wallet to switch, or use the options below:\n"
 
@@ -635,7 +702,6 @@ async def show_token_balances(update: Update, context: ContextTypes.DEFAULT_TYPE
     keyboard = [[InlineKeyboardButton("⬅️ Back to Wallet Menu", callback_data="wallets_menu")]]
     await query.message.reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
-
 async def import_wallet_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the conversation for importing a wallet."""
     user_id = update.effective_user.id
@@ -690,7 +756,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def token_info_detector(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detects if a message is a Solana token address and provides a link to explore it."""
+    """Detects if a message is a Solana token address and provides info."""
     user_id = update.effective_user.id
     if is_rate_limited(user_id):
         await update.message.reply_text("Please wait a moment before sending another command.")
@@ -743,8 +809,7 @@ async def airdrop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Airdrop failed: {e}")
         await update.message.reply_text(f"❌ Airdrop failed: {e}. Please try again later.")
 
-# --- Trading Logic Placeholders ---
-
+# --- Trading Logic with Jupiter DEX Aggregator ---
 async def buy_sell_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the buy/sell menu."""
     query = update.callback_query
@@ -777,14 +842,14 @@ async def buy_token_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ No wallet connected. Please import one first.")
         return
 
-    await query.edit_message_text("Please send the *token address* you wish to buy.")
+    await query.edit_message_text("Please send the *token address* you wish to buy (SOL will be used to buy it).")
     return BUY_TOKEN_ADDRESS
 
 async def receive_buy_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receives the token address for buying."""
     token_address_str = update.message.text.strip()
     try:
-        Pubkey.from_string(token_address_str)
+        token_pubkey = Pubkey.from_string(token_address_str)
     except Exception:
         await update.message.reply_text("❌ Invalid token address. Please send a valid Solana token address.")
         return BUY_TOKEN_ADDRESS
@@ -794,7 +859,7 @@ async def receive_buy_token_address(update: Update, context: ContextTypes.DEFAUL
     return BUY_TOKEN_AMOUNT
 
 async def receive_buy_token_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives the SOL amount for buying and initiates the transaction."""
+    """Receives the SOL amount for buying and executes the swap."""
     try:
         sol_amount = float(update.message.text.strip())
         if sol_amount <= 0:
@@ -814,21 +879,42 @@ async def receive_buy_token_amount(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("An error occurred. Please restart the buy process with /buy_sell.")
         return ConversationHandler.END
 
-    await update.message.reply_text(f"Preparing to buy token `{token_address_str}` with {sol_amount} SOL...")
-
     try:
-        async with AsyncClient(SOLANA_RPC_URL) as client:
-            current_sol_balance = await _get_sol_balance(SOLANA_RPC_URL, str(wallet.pubkey()))
-            if current_sol_balance < sol_amount:
-                await update.message.reply_text(
-                    f"❌ Insufficient SOL balance. You have {current_sol_balance:.4f} SOL, but need {sol_amount} SOL."
-                )
-                return ConversationHandler.END
+        token_pubkey = Pubkey.from_string(token_address_str)
+        amount_lamports = int(sol_amount * 1e9)  # Convert SOL to lamports
 
+        await update.message.reply_text(f"Getting quote for buying token with {sol_amount} SOL...")
+        
+        # Get quote from Jupiter
+        quote = await get_swap_quote(SOL_MINT, token_pubkey, amount_lamports)
+        if not quote:
+            await update.message.reply_text("❌ Could not get a quote for this token. It may not have sufficient liquidity.")
+            return ConversationHandler.END
+
+        # Get token decimals for display
+        token_decimals = await get_token_decimals(token_pubkey)
+        if token_decimals is None:
+            token_decimals = 5  # Default to 5 decimals if we can't fetch it
+
+        estimated_out_amount = float(quote['outAmount']) / (10 ** token_decimals)
+        
+        await update.message.reply_text(
+            f"Quote received:\n"
+            f"↳ Spending: {sol_amount:.4f} SOL\n"
+            f"↳ Receiving: ~{estimated_out_amount:.2f} tokens\n\n"
+            f"Executing swap..."
+        )
+
+        # Execute the swap
+        txn_id = await execute_jupiter_swap(wallet, SOL_MINT, token_pubkey, amount_lamports)
+        if txn_id:
             await update.message.reply_text(
-                f"✅ Simulated buy of `{token_address_str}` with {sol_amount} SOL successful!\n"
-                "*(Note: This is a placeholder. Actual token swap logic needs to be implemented using a DEX aggregator like Jupiter.)*"
+                f"✅ Swap executed successfully!\n"
+                f"Transaction: https://explorer.solana.com/tx/{txn_id}\n"
+                f"You should receive your tokens shortly."
             )
+        else:
+            await update.message.reply_text("❌ Failed to execute swap. Please try again later.")
 
     except RPCException as e:
         logger.error(f"Solana RPC error during buy: {e}")
@@ -853,14 +939,14 @@ async def sell_token_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ No wallet connected. Please import one first.")
         return
 
-    await query.edit_message_text("Please send the *token address* you wish to sell.")
+    await query.edit_message_text("Please send the *token address* you wish to sell (will be sold for SOL).")
     return SELL_TOKEN_ADDRESS
 
 async def receive_sell_token_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Receives the token address for selling."""
     token_address_str = update.message.text.strip()
     try:
-        Pubkey.from_string(token_address_str)
+        token_pubkey = Pubkey.from_string(token_address_str)
     except Exception:
         await update.message.reply_text("❌ Invalid token address. Please send a valid Solana token address.")
         return SELL_TOKEN_ADDRESS
@@ -870,7 +956,7 @@ async def receive_sell_token_address(update: Update, context: ContextTypes.DEFAU
     return SELL_TOKEN_AMOUNT
 
 async def receive_sell_token_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receives the token amount for selling and initiates the transaction."""
+    """Receives the token amount for selling and executes the swap."""
     try:
         token_amount = float(update.message.text.strip())
         if token_amount <= 0:
@@ -890,13 +976,43 @@ async def receive_sell_token_amount(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("An error occurred. Please restart the sell process with /buy_sell.")
         return ConversationHandler.END
 
-    await update.message.reply_text(f"Preparing to sell {token_amount} of token `{token_address_str}`...")
-
     try:
+        token_pubkey = Pubkey.from_string(token_address_str)
+        
+        # Get token decimals to calculate raw amount
+        token_decimals = await get_token_decimals(token_pubkey)
+        if token_decimals is None:
+            token_decimals = 5  # Default to 5 decimals if we can't fetch it
+            
+        raw_amount = int(token_amount * (10 ** token_decimals))
+
+        await update.message.reply_text(f"Getting quote for selling {token_amount} tokens...")
+        
+        # Get quote from Jupiter
+        quote = await get_swap_quote(token_pubkey, SOL_MINT, raw_amount)
+        if not quote:
+            await update.message.reply_text("❌ Could not get a quote for this token. It may not have sufficient liquidity.")
+            return ConversationHandler.END
+
+        estimated_sol_amount = float(quote['outAmount']) / 1e9  # Convert lamports to SOL
+        
         await update.message.reply_text(
-            f"✅ Simulated sell of {token_amount} of `{token_address_str}` successful!\n"
-            "*(Note: This is a placeholder. Actual token swap logic needs to be implemented using a DEX aggregator like Jupiter.)*"
+            f"Quote received:\n"
+            f"↳ Selling: {token_amount:.2f} tokens\n"
+            f"↳ Receiving: ~{estimated_sol_amount:.4f} SOL\n\n"
+            f"Executing swap..."
         )
+
+        # Execute the swap
+        txn_id = await execute_jupiter_swap(wallet, token_pubkey, SOL_MINT, raw_amount)
+        if txn_id:
+            await update.message.reply_text(
+                f"✅ Swap executed successfully!\n"
+                f"Transaction: https://explorer.solana.com/tx/{txn_id}\n"
+                f"You should receive your SOL shortly."
+            )
+        else:
+            await update.message.reply_text("❌ Failed to execute swap. Please try again later.")
 
     except RPCException as e:
         logger.error(f"Solana RPC error during sell: {e}")
@@ -908,7 +1024,6 @@ async def receive_sell_token_amount(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 # --- SPL Token Creation Logic ---
-
 async def create_token_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the SPL token creation conversation."""
     query = update.callback_query
@@ -1247,7 +1362,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "revoke_permissions":
         return await revoke_permissions_start(update, context)
 
-
 async def start_menu_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Helper for 'start_menu' callback."""
     msg, reply_markup = await get_start_message(update.callback_query.from_user.id)
@@ -1284,7 +1398,6 @@ async def tutorials_message_action(update: Update, context: ContextTypes.DEFAULT
 async def close_message_action(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
     await update.callback_query.edit_message_text("Bot closed. Type /start to restart.")
 
-
 # --- Main function ---
 def main():
     """Main function to run the Telegram bot."""
@@ -1294,6 +1407,7 @@ def main():
 
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Conversation handlers
     import_wallet_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('importwallet', import_wallet_start),
@@ -1358,14 +1472,16 @@ def main():
     )
     application.add_handler(revoke_permissions_conv_handler)
 
-
+    # Command handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('wallets', wallets_command))
     application.add_handler(CommandHandler('airdrop', airdrop_command))
     application.add_handler(CommandHandler('cancel', cancel))
 
+    # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, token_info_detector))
 
+    # Callback query handler
     application.add_handler(CallbackQueryHandler(handle_callback_query))
 
     logger.info("Bot started and polling...")
