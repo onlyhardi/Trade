@@ -7,6 +7,7 @@ import base58
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from mnemonic import Mnemonic
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
