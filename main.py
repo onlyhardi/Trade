@@ -19,25 +19,31 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 
+# Core Solana types, moved to solders for performance and consistency
 from solders.keypair import Keypair
-from solana.rpc.async_api import AsyncClient
 from solders.pubkey import Pubkey
-from solana.transaction import Transaction
-from solana.system_program import transfer
-from solana.rpc.types import TxOpts, TokenAccountOpts
-from solana.rpc.api import RPCException
-from solana.rpc.commitment import Confirmed
+from solders.transaction import Transaction, VersionedTransaction # <--- Make sure this is correct now!
+from solders.system_program import transfer # For SystemProgram instructions like SOL transfer
+from solders.hash import Hash # Often needed for recent_blockhash
+from solders.message import Message, MessageV0 # For building transaction messages
 
-from mnemonic import Mnemonic
+# Solana.py RPC client and related types (these should largely remain in solana.*)
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.types import TxOpts, TokenAccountOpts
+from solana.rpc.api import RPCException # For handling RPC errors
+from solana.rpc.commitment import Confirmed # For transaction confirmation
+
+# SPL Token related imports (these are usually fine in spl.token.*)
 from spl.token.async_client import AsyncToken
 from spl.token.constants import TOKEN_PROGRAM_ID
 from spl.token.instructions import (
     get_associated_token_address,
     revoke,
-    RevokeParams
+    RevokeParams,
+    # ... other SPL token instructions you might use
 )
 
-# Jupiter SDK imports
+# If you are using jupiter-python-sdk, keep its import
 from jupiter_python_sdk.jupiter import Jupiter
 
 # --- Load environment variables ---
