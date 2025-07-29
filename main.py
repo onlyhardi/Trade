@@ -24,6 +24,7 @@ from telegram.ext import (
 # Core Solana types, moved to solders for performance and consistency
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
+from solders.system_program import TransferParams
 from solders.transaction import Transaction, VersionedTransaction # <--- Make sure this is correct now!
 from solders.system_program import transfer # For SystemProgram instructions like SOL transfer
 from solders.hash import Hash # Often needed for recent_blockhash
