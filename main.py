@@ -3,6 +3,7 @@ import os
 import re
 import time
 import json
+import base64
 import base58
 import requests
 from datetime import datetime, timedelta
